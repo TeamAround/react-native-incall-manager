@@ -23,13 +23,14 @@ import android.content.IntentFilter;
 import android.content.BroadcastReceiver;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.Manifest.permission;
 import android.media.AudioAttributes; // --- for API 21+
 import android.media.AudioManager;
 import androidx.media.AudioAttributesCompat;
 import androidx.media.AudioManagerCompat;
 import androidx.media.AudioFocusRequestCompat;
 import android.media.AudioDeviceInfo;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.ToneGenerator;
 import android.net.Uri;
@@ -38,8 +39,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.provider.Settings;
 import androidx.annotation.Nullable;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
+//import androidx.core.app.ActivityCompat;
+//import androidx.core.content.ContextCompat;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.Display;
@@ -62,19 +63,19 @@ import com.facebook.react.modules.core.DeviceEventManagerModule;
 import java.lang.Runnable;
 import java.io.File;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.Executors;
 
 import com.zxcpoiu.incallmanager.AppRTC.AppRTCBluetoothManager;
 
-public class InCallManagerModule extends ReactContextBaseJavaModule implements LifecycleEventListener {
+public class InCallManagerModule extends ReactContextBaseJavaModule implements LifecycleEventListener, AudioManager.OnAudioFocusChangeListener {
     private static final String REACT_NATIVE_MODULE_NAME = "InCallManager";
     private static final String TAG = REACT_NATIVE_MODULE_NAME;
-    private static SparseArray<Promise> mRequestPermissionCodePromises;
-    private static SparseArray<String> mRequestPermissionCodeTargetPermission;
     private String mPackageName = "com.zxcpoiu.incallmanager";
 
     // --- Screen Manager
@@ -86,6 +87,7 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
     private AudioManager audioManager;
     private boolean audioManagerActivated = false;
     private boolean isAudioFocused = false;
+    //private final Object mAudioFocusLock = new Object();
     private boolean isOrigAudioSetupStored = false;
     private boolean origIsSpeakerPhoneOn = false;
     private boolean origIsMicrophoneMute = false;
@@ -100,7 +102,8 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
     private BroadcastReceiver wiredHeadsetReceiver;
     private BroadcastReceiver noisyAudioReceiver;
     private BroadcastReceiver mediaButtonReceiver;
-    private OnFocusChangeListener mOnFocusChangeListener;
+    private AudioAttributes mAudioAttributes;
+    private AudioFocusRequest mAudioFocusRequest;
 
     // --- same as: RingtoneManager.getActualDefaultRingtoneUri(reactContext, RingtoneManager.TYPE_RINGTONE);
     private Uri defaultRingtoneUri = Settings.System.DEFAULT_RINGTONE_URI;
@@ -117,8 +120,6 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
     private Handler mRingtoneCountDownHandler;
     private String media = "audio";
     private String wiredHeadsetDeviceName = "";
-    private static String recordPermission = "unknow";
-    private static String cameraPermission = "unknow";
     private static String androidBluetoothPermission = "unknow";
 
     private static final String SPEAKERPHONE_AUTO = "auto";
@@ -174,9 +175,6 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
     // avoid duplicate elements.
     private Set<AudioDevice> audioDevices = new HashSet<>();
 
-    // Callback method for changes in audio focus.
-    private AudioManager.OnAudioFocusChangeListener audioFocusChangeListener;
-
     // We need context for SharedPrefs. 
     private ReactApplicationContext reactContext;
 
@@ -199,6 +197,18 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
         mWindowManager = (WindowManager) reactContext.getSystemService(Context.WINDOW_SERVICE);
         mPowerManager = (PowerManager) reactContext.getSystemService(Context.POWER_SERVICE);
         audioManager = ((AudioManager) reactContext.getSystemService(Context.AUDIO_SERVICE));
+        audioManager.addOnCommunicationDeviceChangedListener(Executors.newSingleThreadScheduledExecutor(), new AudioManager.OnCommunicationDeviceChangedListener() {
+            @Override
+            public void onCommunicationDeviceChanged(@Nullable AudioDeviceInfo audioDeviceInfo) {
+                Log.d(TAG, "changed communication device " + audioDeviceInfo);
+            }
+        });
+        audioManager.addOnModeChangedListener(Executors.newSingleThreadScheduledExecutor(), new AudioManager.OnModeChangedListener() {
+            @Override
+            public void onModeChanged(int i) {
+                Log.d(TAG, "changed mode " + i);
+            }
+        });
         audioUriMap = new HashMap<String, Uri>();
         audioUriMap.put("defaultRingtoneUri", defaultRingtoneUri);
         audioUriMap.put("defaultRingbackUri", defaultRingbackUri);
@@ -206,9 +216,6 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
         audioUriMap.put("bundleRingtoneUri", bundleRingtoneUri);
         audioUriMap.put("bundleRingbackUri", bundleRingbackUri);
         audioUriMap.put("bundleBusytoneUri", bundleBusytoneUri);
-        mRequestPermissionCodePromises = new SparseArray<Promise>();
-        mRequestPermissionCodeTargetPermission = new SparseArray<String>();
-        mOnFocusChangeListener = new OnFocusChangeListener();
         proximityManager = InCallProximityManager.create(reactContext, this);
         wakeLockUtils = new InCallWakeLockUtils(reactContext);
 
@@ -474,45 +481,46 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
         isProximityRegistered = false;
     }
 
-    private class OnFocusChangeListener implements AudioManager.OnAudioFocusChangeListener {
-
-        @Override
-        public void onAudioFocusChange(final int focusChange) {
-            String focusChangeStr;
-            switch (focusChange) {
-                case AudioManager.AUDIOFOCUS_GAIN:
-                    focusChangeStr = "AUDIOFOCUS_GAIN";
-                    break;
-                case AudioManager.AUDIOFOCUS_GAIN_TRANSIENT:
-                    focusChangeStr = "AUDIOFOCUS_GAIN_TRANSIENT";
-                    break;
-                case AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE:
-                    focusChangeStr = "AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE";
-                    break;
-                case AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK:
-                    focusChangeStr = "AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK";
-                    break;
-                case AudioManager.AUDIOFOCUS_LOSS:
-                    focusChangeStr = "AUDIOFOCUS_LOSS";
-                    break;
-                case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                    focusChangeStr = "AUDIOFOCUS_LOSS_TRANSIENT";
-                    break;
-                case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                    focusChangeStr = "AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK";
-                    break;
-                default:
-                    focusChangeStr = "AUDIOFOCUS_UNKNOW";
-                    break;
-            }
-
-            Log.d(TAG, "onAudioFocusChange: " + focusChange + " - " + focusChangeStr);
-
-            WritableMap data = Arguments.createMap();
-            data.putString("eventText", focusChangeStr);
-            data.putInt("eventCode", focusChange);
-            sendEvent("onAudioFocusChange", data);
+    // --- see: https://developer.android.com/reference/android/media/AudioManager
+    @Override
+    public void onAudioFocusChange(int focusChange) {
+        String focusChangeStr;
+        switch (focusChange) {
+            case AudioManager.AUDIOFOCUS_GAIN:
+                focusChangeStr = "AUDIOFOCUS_GAIN";
+                break;
+            case AudioManager.AUDIOFOCUS_GAIN_TRANSIENT:
+                focusChangeStr = "AUDIOFOCUS_GAIN_TRANSIENT";
+                break;
+            case AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE:
+                focusChangeStr = "AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE";
+                break;
+            case AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK:
+                focusChangeStr = "AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK";
+                break;
+            case AudioManager.AUDIOFOCUS_LOSS:
+                focusChangeStr = "AUDIOFOCUS_LOSS";
+                break;
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                focusChangeStr = "AUDIOFOCUS_LOSS_TRANSIENT";
+                break;
+            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                focusChangeStr = "AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK";
+                break;
+            case AudioManager.AUDIOFOCUS_NONE:
+                focusChangeStr = "AUDIOFOCUS_NONE";
+                break;
+            default:
+                focusChangeStr = "AUDIOFOCUS_UNKNOW";
+                break;
         }
+
+        Log.d(TAG, "onAudioFocusChange: " + focusChange + " - " + focusChangeStr);
+
+        WritableMap data = Arguments.createMap();
+        data.putString("eventText", focusChangeStr);
+        data.putInt("eventCode", focusChange);
+        sendEvent("onAudioFocusChange", data);
     }
 
     /*
@@ -652,7 +660,7 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
                     bluetoothManager.stop();
                 }
                 restoreOriginalAudioSetup();
-                releaseAudioFocus();
+                abandonAudioFocus();
                 audioManagerActivated = false;
             }
             wakeLockUtils.releasePartialWakeLock();
@@ -676,24 +684,145 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
         turnScreenOn();
     }
 
-    private void requestAudioFocus() {
-        if (!isAudioFocused) {
-            int result = audioManager.requestAudioFocus(mOnFocusChangeListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN);
-            if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                Log.d(TAG, "AudioFocus granted");
-                isAudioFocused = true;
-            } else if (result == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
-                Log.d(TAG, "AudioFocus failed");
-                isAudioFocused = false;
-            }
-        }
+    @ReactMethod
+    public void requestAudioFocusJS(Promise promise) {
+        promise.resolve(requestAudioFocus());
     }
 
-    private void releaseAudioFocus() {
+    private String requestAudioFocus() {
+        String requestAudioFocusResStr = (android.os.Build.VERSION.SDK_INT >= 26)
+                ? requestAudioFocusV26()
+                : requestAudioFocusOld();
+        Log.d(TAG, "requestAudioFocus(): res = " + requestAudioFocusResStr);
+        return requestAudioFocusResStr;
+    }
+
+    private String requestAudioFocusV26() {
         if (isAudioFocused) {
-            audioManager.abandonAudioFocus(null);
-            isAudioFocused = false;
+            return "";
         }
+
+        if (mAudioAttributes == null) {
+            mAudioAttributes = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build();
+        }
+
+        if (mAudioFocusRequest == null) {
+            mAudioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(mAudioAttributes)
+                    .setAcceptsDelayedFocusGain(false)
+                    .setWillPauseWhenDucked(false)
+                    .setOnAudioFocusChangeListener(this)
+                    .build();
+        }
+
+        int requestAudioFocusRes = audioManager.requestAudioFocus(mAudioFocusRequest);
+        String requestAudioFocusResStr;
+        switch (requestAudioFocusRes) {
+            case AudioManager.AUDIOFOCUS_REQUEST_FAILED:
+                requestAudioFocusResStr = "AUDIOFOCUS_REQUEST_FAILED";
+                break;
+            case AudioManager.AUDIOFOCUS_REQUEST_GRANTED:
+                isAudioFocused = true;
+                requestAudioFocusResStr = "AUDIOFOCUS_REQUEST_GRANTED";
+                break;
+            case AudioManager.AUDIOFOCUS_REQUEST_DELAYED:
+                requestAudioFocusResStr = "AUDIOFOCUS_REQUEST_DELAYED";
+                break;
+            default:
+                requestAudioFocusResStr = "AUDIOFOCUS_REQUEST_UNKNOWN";
+                break;
+        }
+        Log.d(TAG, "requestAudioFocus(): res = " + requestAudioFocusRes + " - " + requestAudioFocusResStr);
+        return requestAudioFocusResStr;
+    }
+
+    private String requestAudioFocusOld() {
+        if (isAudioFocused) {
+            return "";
+        }
+
+        int requestAudioFocusRes = audioManager.requestAudioFocus(this, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+
+        String requestAudioFocusResStr;
+        switch (requestAudioFocusRes) {
+            case AudioManager.AUDIOFOCUS_REQUEST_FAILED:
+                requestAudioFocusResStr = "AUDIOFOCUS_REQUEST_FAILED";
+                break;
+            case AudioManager.AUDIOFOCUS_REQUEST_GRANTED:
+                isAudioFocused = true;
+                requestAudioFocusResStr = "AUDIOFOCUS_REQUEST_GRANTED";
+                break;
+            default:
+                requestAudioFocusResStr = "AUDIOFOCUS_REQUEST_UNKNOWN";
+                break;
+        }
+
+        Log.d(TAG, "requestAudioFocus(): res = " + requestAudioFocusRes + " - " + requestAudioFocusResStr);
+        return requestAudioFocusResStr;
+    }
+
+    @ReactMethod
+    public void abandonAudioFocusJS(Promise promise) {
+        promise.resolve(abandonAudioFocus());
+    }
+
+    private String abandonAudioFocus() {
+        String abandonAudioFocusResStr = (android.os.Build.VERSION.SDK_INT >= 26)
+                ? abandonAudioFocusV26()
+                : abandonAudioFocusOld();
+        Log.d(TAG, "abandonAudioFocus(): res = " + abandonAudioFocusResStr);
+        return abandonAudioFocusResStr;
+    }
+
+    private String abandonAudioFocusV26() {
+        if (!isAudioFocused || mAudioFocusRequest == null) {
+            return "";
+        }
+
+        int abandonAudioFocusRes = audioManager.abandonAudioFocusRequest(mAudioFocusRequest);
+        String abandonAudioFocusResStr;
+        switch (abandonAudioFocusRes) {
+            case AudioManager.AUDIOFOCUS_REQUEST_FAILED:
+                abandonAudioFocusResStr = "AUDIOFOCUS_REQUEST_FAILED";
+                break;
+            case AudioManager.AUDIOFOCUS_REQUEST_GRANTED:
+                isAudioFocused = false;
+                abandonAudioFocusResStr = "AUDIOFOCUS_REQUEST_GRANTED";
+                break;
+            default:
+                abandonAudioFocusResStr = "AUDIOFOCUS_REQUEST_UNKNOWN";
+                break;
+        }
+        Log.d(TAG, "abandonAudioFocus(): res = " + abandonAudioFocusRes + " - " + abandonAudioFocusResStr);
+        return abandonAudioFocusResStr;
+    }
+
+    private String abandonAudioFocusOld() {
+        if (!isAudioFocused) {
+            return "";
+        }
+
+        int abandonAudioFocusRes = audioManager.abandonAudioFocus(this);
+
+        String abandonAudioFocusResStr;
+        switch (abandonAudioFocusRes) {
+            case AudioManager.AUDIOFOCUS_REQUEST_FAILED:
+                abandonAudioFocusResStr = "AUDIOFOCUS_REQUEST_FAILED";
+                break;
+            case AudioManager.AUDIOFOCUS_REQUEST_GRANTED:
+                isAudioFocused = false;
+                abandonAudioFocusResStr = "AUDIOFOCUS_REQUEST_GRANTED";
+                break;
+            default:
+                abandonAudioFocusResStr = "AUDIOFOCUS_REQUEST_UNKNOWN";
+                break;
+        }
+
+        Log.d(TAG, "abandonAudioFocus(): res = " + abandonAudioFocusRes + " - " + abandonAudioFocusResStr);
+        return abandonAudioFocusResStr;
     }
 
     @ReactMethod
@@ -785,10 +914,39 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
 
     @ReactMethod
     public void setSpeakerphoneOn(final boolean enable) {
-        if (enable != audioManager.isSpeakerphoneOn())  {
-            Log.d(TAG, "setSpeakerphoneOn(): " + enable);
-            audioManager.setSpeakerphoneOn(enable);
-        }
+
+        Log.i(TAG, "Current AudioDevice = " + audioManager.getCommunicationDevice().toString());
+        Log.i(TAG, "PRE STATUS = " + audioManager.isSpeakerphoneOn());
+
+//        public static final int TYPE_BLUETOOTH_A2DP = 8;
+//        public static final int TYPE_BLUETOOTH_SCO = 7;
+//        public static final int TYPE_BUILTIN_EARPIECE = 1;
+//        public static final int TYPE_BUILTIN_MIC = 15;
+//        public static final int TYPE_BUILTIN_SPEAKER = 2;
+//        public static final int TYPE_BUILTIN_SPEAKER_SAFE = 24;
+
+        audioManager.setMode(AudioManager.MODE_NORMAL);
+        List< AudioDeviceInfo > devices = audioManager.getAvailableCommunicationDevices();
+                for (AudioDeviceInfo device: devices) {
+                    Log.d(TAG, "Found device " + device.getType());
+                    if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                        Log.d(TAG, "try to set speaker " + device.toString());
+                        boolean result = audioManager.setCommunicationDevice(device);
+                        Log.d(TAG, String.valueOf(result));
+                    }
+                }
+
+//        public static final int MODE_IN_COMMUNICATION = 3;
+//        public static final int MODE_NORMAL = 0;
+//        public static final int MODE_RINGTONE = 1;
+//        if (enable != audioManager.isSpeakerphoneOn())  {
+//            Log.d(TAG, "setSpeakerphoneOn(): " + enable);
+//            audioManager.setMode(defaultAudioMode);
+//            audioManager.setSpeakerphoneOn(enable);
+//        }
+
+        Log.i(TAG, "New AudioDevice = " + audioManager.getCommunicationDevice().toString());
+        Log.i(TAG, "POST STATUS = " + audioManager.isSpeakerphoneOn());
     }
 
     // --- TODO (zxcpoiu): These two api name is really confusing. should be changed.
@@ -865,8 +1023,8 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
             data.put("sourceUri", ringbackUri);
             data.put("setLooping", true);
 
-            data.put("audioUsage", AudioAttributesCompat.USAGE_VOICE_COMMUNICATION);
-            data.put("audioContentType", AudioAttributesCompat.CONTENT_TYPE_MUSIC);
+            data.put("audioUsage", AudioAttributes.USAGE_VOICE_COMMUNICATION);
+            data.put("audioContentType", AudioAttributes.CONTENT_TYPE_MUSIC);
 
             setMediaPlayerEvents((MediaPlayer)mRingback, "mRingback");
             mRingback.startPlay(data);
@@ -930,8 +1088,8 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
 //            data.put("audioStream", AudioManager.STREAM_VOICE_CALL);
 
             // --- Should use VOICE_COMMUNICATION for sound during a call or it may be silenced.
-            data.put("audioUsage", AudioAttributesCompat.USAGE_VOICE_COMMUNICATION);
-            data.put("audioContentType", AudioAttributesCompat.CONTENT_TYPE_SONIFICATION); // --- CONTENT_TYPE_MUSIC?
+            data.put("audioUsage", AudioAttributes.USAGE_VOICE_COMMUNICATION);
+            data.put("audioContentType", AudioAttributes.CONTENT_TYPE_SONIFICATION); // --- CONTENT_TYPE_MUSIC?
 
             setMediaPlayerEvents((MediaPlayer)mBusytone, "mBusytone");
             mBusytone.startPlay(data);
@@ -995,8 +1153,8 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
             data.put("audioStream", AudioManager.STREAM_RING);
 
             //data.put("audioStream", AudioManager.STREAM_RING); // --- lagacy
-            data.put("audioUsage", AudioAttributesCompat.USAGE_NOTIFICATION_RINGTONE); // --- USAGE_NOTIFICATION_COMMUNICATION_REQUEST?
-            data.put("audioContentType", AudioAttributesCompat.CONTENT_TYPE_MUSIC);
+            data.put("audioUsage", AudioAttributes.USAGE_NOTIFICATION_RINGTONE); // --- USAGE_NOTIFICATION_COMMUNICATION_REQUEST?
+            data.put("audioContentType", AudioAttributes.CONTENT_TYPE_MUSIC);
 
             setMediaPlayerEvents((MediaPlayer) mRingtone, "mRingtone");
 
@@ -1407,109 +1565,6 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
     }
 // ===== Internal Classes End =====
 
-    //  ===== Permission Start =====
-    @ReactMethod
-    public void checkRecordPermission(Promise promise) {
-        Log.d(TAG, "RNInCallManager.checkRecordPermission(): enter");
-        _checkRecordPermission();
-        if (recordPermission.equals("unknow")) {
-            Log.d(TAG, "RNInCallManager.checkRecordPermission(): failed");
-            promise.reject(new Exception("checkRecordPermission failed"));
-        } else {
-            promise.resolve(recordPermission);
-        }
-    }
-
-    @ReactMethod
-    public void checkCameraPermission(Promise promise) {
-        Log.d(TAG, "RNInCallManager.checkCameraPermission(): enter");
-        _checkCameraPermission();
-        if (cameraPermission.equals("unknow")) {
-            Log.d(TAG, "RNInCallManager.checkCameraPermission(): failed");
-            promise.reject(new Exception("checkCameraPermission failed"));
-        } else {
-            promise.resolve(cameraPermission);
-        }
-    }
-
-    @ReactMethod
-    public void checkAndroidBluetoothPermission(Promise promise) {
-        Log.d(TAG, "RNInCallManager.checkAndroidBluetoothPermission(): enter");
-        _checkAndroidBluetoothPermission();
-        if (androidBluetoothPermission.equals("unknow")) {
-            Log.d(TAG, "RNInCallManager.checkAndroidBluetoothPermission(): failed");
-            promise.reject(new Exception("checkAndroidBluetoothPermission failed"));
-        } else {
-            promise.resolve(androidBluetoothPermission);
-        }
-    }
-
-    private void _checkRecordPermission() {
-        recordPermission = _checkPermission(permission.RECORD_AUDIO);
-        Log.d(TAG, String.format("RNInCallManager.checkRecordPermission(): recordPermission=%s", recordPermission));
-    }
-
-    private void _checkCameraPermission() {
-        cameraPermission = _checkPermission(permission.CAMERA);
-        Log.d(TAG, String.format("RNInCallManager.checkCameraPermission(): cameraPermission=%s", cameraPermission));
-    }
-
-    private void _checkAndroidBluetoothPermission() {
-        androidBluetoothPermission = _checkPermission(android.os.Build.VERSION.SDK_INT < 30 ?  permission.BLUETOOTH : "android.permission.BLUETOOTH_CONNECT");
-        Log.d(TAG, String.format("RNInCallManager.checkAndroidBluetoothPermission(): androidBluetoothPermission=%s", androidBluetoothPermission));
-    }
-
-    private String _checkPermission(String targetPermission) {
-        try {
-            ReactContext reactContext = getReactApplicationContext();
-            if (ContextCompat.checkSelfPermission(reactContext, targetPermission) == PackageManager.PERMISSION_GRANTED) {
-                return "granted";
-            } else {
-                return "denied";
-            }
-        } catch (Exception e) {
-            Log.d(TAG, "_checkPermission() catch");
-            return "denied";
-        }
-    }
-
-    @ReactMethod
-    public void requestRecordPermission(Promise promise) {
-        Log.d(TAG, "RNInCallManager.requestRecordPermission(): enter");
-        _checkRecordPermission();
-        if (!recordPermission.equals("granted")) {
-            _requestPermission(permission.RECORD_AUDIO, promise);
-        } else {
-            // --- already granted
-            promise.resolve(recordPermission);
-        }
-    }
-
-    @ReactMethod
-    public void requestCameraPermission(Promise promise) {
-        Log.d(TAG, "RNInCallManager.requestCameraPermission(): enter");
-        _checkCameraPermission();
-        if (!cameraPermission.equals("granted")) {
-            _requestPermission(permission.CAMERA, promise);
-        } else {
-            // --- already granted
-            promise.resolve(cameraPermission);
-        }
-    }
-
-    @ReactMethod
-    public void requestAndroidBluetoothPermission(Promise promise) {
-        Log.d(TAG, "RNInCallManager.requestAndroidBluetoothPermission(): enter");
-        _checkAndroidBluetoothPermission();
-        if (!isBluetoothPermissionGrantedOrDeniedByUser()) {
-            _requestPermission(android.os.Build.VERSION.SDK_INT < 30 ?  permission.BLUETOOTH : "android.permission.BLUETOOTH_CONNECT", promise);
-            setBluetoothPermissionGrantedOrDeniedByUser();
-        } else {
-            // --- already granted or denied
-            promise.resolve(androidBluetoothPermission);
-        }
-    }
-
     @ReactMethod
     public void chooseAudioRoute(String audioRoute, Promise promise) {
         Log.d(TAG, "RNInCallManager.chooseAudioRoute(): user choose audioDevice = " + audioRoute);
@@ -1526,33 +1581,6 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
         promise.resolve(getAudioDeviceStatusMap());
     }
 
-    private void _requestPermission(String targetPermission, Promise promise) {
-        Activity currentActivity = getCurrentActivity();
-        if (currentActivity == null) {
-            Log.d(TAG, String.format("RNInCallManager._requestPermission(): ReactContext doesn't hava any Activity attached when requesting %s", targetPermission));
-            promise.reject(new Exception("_requestPermission(): currentActivity is not attached"));
-            return;
-        }
-        int requestPermissionCode = getRandomInteger(1, 65535);
-        while (mRequestPermissionCodePromises.get(requestPermissionCode, null) != null) {
-            requestPermissionCode = getRandomInteger(1, 65535);
-        }
-        mRequestPermissionCodePromises.put(requestPermissionCode, promise);
-        mRequestPermissionCodeTargetPermission.put(requestPermissionCode, targetPermission);
-        /*
-        if (ActivityCompat.shouldShowRequestPermissionRationale(currentActivity, permission.RECORD_AUDIO)) {
-            showMessageOKCancel("You need to allow access to microphone for making call", new DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(DialogInterface dialog, int which) {
-                    ActivityCompat.requestPermissions(currentActivity, new String[] {permission.RECORD_AUDIO}, requestPermissionCode);
-                }
-            });
-            return;
-        }
-        */
-        ActivityCompat.requestPermissions(currentActivity, new String[] {targetPermission}, requestPermissionCode);
-    }
-
     private static int getRandomInteger(int min, int max) {
         if (min >= max) {
             throw new IllegalArgumentException("max must be greater than min");
@@ -1560,50 +1588,6 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
         Random random = new Random();
         return random.nextInt((max - min) + 1) + min;
     }
-
-    protected static void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        Log.d(TAG, "RNInCallManager.onRequestPermissionsResult(): enter");
-        Promise promise = mRequestPermissionCodePromises.get(requestCode, null);
-        String targetPermission = mRequestPermissionCodeTargetPermission.get(requestCode, null);
-        mRequestPermissionCodePromises.delete(requestCode);
-        mRequestPermissionCodeTargetPermission.delete(requestCode);
-        if (promise != null && targetPermission != null) {
-
-            Map<String, Integer> permissionResultMap = new HashMap<String, Integer>();
-
-            for (int i = 0; i < permissions.length; i++) {
-                permissionResultMap.put(permissions[i], grantResults[i]);
-            }
-
-            if (!permissionResultMap.containsKey(targetPermission)) {
-                Log.wtf(TAG, String.format("RNInCallManager.onRequestPermissionsResult(): requested permission %s but did not appear", targetPermission));
-                promise.reject(String.format("%s_PERMISSION_NOT_FOUND", targetPermission), String.format("requested permission %s but did not appear", targetPermission));
-                return;
-            }
-
-            String _requestPermissionResult = "unknow";
-            if (permissionResultMap.get(targetPermission) == PackageManager.PERMISSION_GRANTED) {
-                _requestPermissionResult = "granted";
-            } else {
-                _requestPermissionResult = "denied";
-            }
-
-            if (targetPermission.equals(permission.RECORD_AUDIO)) {
-                recordPermission = _requestPermissionResult;
-            } else if (targetPermission.equals(permission.CAMERA)) {
-                cameraPermission = _requestPermissionResult;
-            } else if (targetPermission.equals((android.os.Build.VERSION.SDK_INT < 30 ?  permission.BLUETOOTH : "android.permission.BLUETOOTH_CONNECT"))) {
-                androidBluetoothPermission = _requestPermissionResult;
-
-            }
-            promise.resolve(_requestPermissionResult);
-        } else {
-            //super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-            Log.wtf(TAG, "RNInCallManager.onRequestPermissionsResult(): request code not found");
-            promise.reject("PERMISSION_REQUEST_CODE_NOT_FOUND", "request code not found");
-        }
-    }
-//  ===== Permission End =====
 
     private void pause() {
         if (audioManagerActivated) {
@@ -1789,13 +1773,19 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
                 } else if (type == AudioDeviceInfo.TYPE_USB_DEVICE) {
                     Log.d(TAG, "hasWiredHeadset: found USB audio device");
                     return true;
+                } else if (type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES) {
+                    Log.d(TAG, "hasWiredHeadset: found wired headphones");
+                    return true;
                 }
             }
             return false;
         }
     }
 
-
+    @ReactMethod
+    public void getIsWiredHeadsetPluggedIn(Promise promise) {
+        promise.resolve(this.hasWiredHeadset());
+    }
     /**
      * Updates list of possible audio devices and make new device selection.
      */

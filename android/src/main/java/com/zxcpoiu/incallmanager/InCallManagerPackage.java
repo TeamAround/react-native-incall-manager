@@ -41,8 +41,4 @@ public class InCallManagerPackage implements ReactPackage {
     public List<ViewManager> createViewManagers(ReactApplicationContext reactContext) {
         return Collections.emptyList();
     }
-
-    public static void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        InCallManagerModule.onRequestPermissionsResult(requestCode, permissions, grantResults);
-    }
 }
