@@ -37,6 +37,8 @@ import android.provider.Settings;
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+
+import android.telecom.CallAudioState;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.Display;
@@ -58,7 +60,9 @@ import com.facebook.react.modules.core.DeviceEventManagerModule;
 
 import java.lang.Runnable;
 import java.io.File;
+import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -782,11 +786,142 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
 
     @ReactMethod
     public void setSpeakerphoneOn(final boolean enable) {
-        if (enable != audioManager.isSpeakerphoneOn())  {
-            Log.d(TAG, "setSpeakerphoneOn(): " + enable);
-            audioManager.setSpeakerphoneOn(enable);
+        Log.d(TAG, "setSpeakerphoneOnExperiment5(): " + enable);
+
+        Log.d(TAG, "current mode: " + audioManager.getMode());
+//        public static final int MODE_INVALID = -2;
+//        public static final int MODE_IN_CALL = 2;
+//        public static final int MODE_IN_COMMUNICATION = 3;
+//        public static final int MODE_NORMAL = 0;
+//        public static final int MODE_RINGTONE = 1;
+
+        if (enable) {
+            AudioDeviceInfo loudSpeakerAudioDevice = null;
+            Log.d(TAG, "change mode 5");
+            audioManager.setMode(AudioManager.MODE_IN_CALL);
+
+            List<AudioDeviceInfo> audioDevices = audioManager.getAvailableCommunicationDevices();
+            for (AudioDeviceInfo audioDevice : audioDevices)
+            {
+                if (audioDevice.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+                {
+                    loudSpeakerAudioDevice = audioDevice;
+                }
+            }
+
+            Log.i(TAG, "Current AudioDevice = " + audioManager.getCommunicationDevice().toString());
+            if (audioManager.getCommunicationDevice().getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE)
+            {
+                Log.i(TAG, "Setting to loudSpeakerAudioDevice = " + loudSpeakerAudioDevice.toString());
+                if (audioManager.setCommunicationDevice(loudSpeakerAudioDevice) == false)
+                {
+                    Log.e(TAG, "Failed to set audio device");
+                }
+                Log.i(TAG, "New AudioDevice = " + audioManager.getCommunicationDevice().toString());
+            }
+        } else {
+            AudioDeviceInfo loudSpeakerAudioDevice = null;
+            audioManager.setMode(AudioManager.MODE_NORMAL);
+
+            List<AudioDeviceInfo> audioDevices = audioManager.getAvailableCommunicationDevices();
+            for (AudioDeviceInfo audioDevice : audioDevices)
+            {
+                if (audioDevice.getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE)
+                {
+                    loudSpeakerAudioDevice = audioDevice;
+                }
+            }
+
+            Log.i(TAG, "Current AudioDevice = " + audioManager.getCommunicationDevice().toString());
+            if (audioManager.getCommunicationDevice().getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            {
+                Log.i(TAG, "Setting to loudSpeakerAudioDevice = " + loudSpeakerAudioDevice.toString());
+                if (audioManager.setCommunicationDevice(loudSpeakerAudioDevice) == false)
+                {
+                    Log.e(TAG, "Failed to set audio device");
+                }
+                Log.i(TAG, "New AudioDevice = " + audioManager.getCommunicationDevice().toString());
+            }
         }
+
+        Log.d(TAG, "current mode2: " + audioManager.getMode());
+
+
+//        if (!enable) {
+////            isSpeakerOn = false;
+//            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+////                Utils.getInstance().setCommunicationDevice(getContext(), AudioDeviceInfo.TYPE_BUILTIN_EARPIECE);
+//                List< AudioDeviceInfo > devices = audioManager.getAvailableCommunicationDevices();
+//                for (AudioDeviceInfo device: devices) {
+//                    if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) {
+//                        boolean result = audioManager.setCommunicationDevice(device);
+//                        Log.d("result1: ", String.valueOf(result));
+//                    }
+//                }
+//            } else {
+//                audioManager.setSpeakerphoneOn(false);
+//            }
+////            ivSpeaker.setImageResource(R.drawable.speaker_outline);
+//        } else {
+////            isSpeakerOn = true;
+//            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+////                Utils.getInstance().setCommunicationDevice(getContext(), AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
+//                List< AudioDeviceInfo > devices = audioManager.getAvailableCommunicationDevices();
+//                for (AudioDeviceInfo device: devices) {
+//                    if (device.getType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+//                        boolean result = audioManager.setCommunicationDevice(device);
+//                        Log.d("result2: ", String.valueOf(result));
+//                    }
+//                }
+//            } else {
+//                audioManager.setSpeakerphoneOn(true);
+//            }
+////            ivSpeaker.setImageResource(R.drawable.speaker_filled);
+//        }
+
+////        audioManager.setSpeakerphoneOn(true);
+//        audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+//        Log.d(TAG, "setSpeakerphoneOn2(): " + enable);
+////        audioManager.setSpeakerphoneOn(!audioManager.isSpeakerphoneOn());
+//        if (enable != audioManager.isSpeakerphoneOn())  {
+//            Log.d(TAG, "setSpeakerphoneOn(): " + enable);
+//            audioManager.setMode(defaultAudioMode);
+//            audioManager.setSpeakerphoneOn(enable);
+//        }
+////
+////        if (enable){
+////            audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+////        } else {
+////            audioManager.setMode(AudioManager.MODE_NORMAL);
+////        }
+
+
+//        try {
+//            Class audioSystemClass = Class.forName("android.media.AudioSystem");
+//            Method setForceUse = audioSystemClass.getMethod("setForceUse", int.class, int.class);
+//            setForceUse.invoke(null, 1, 1);
+//        }catch (Exception err){
+//            err.printStackTrace();
+//        }
+
+
+//        if (enable != audioManager.isSpeakerphoneOn())  {
+//            Log.d(TAG, "setSpeakerphoneOn(): " + enable);
+//            audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+//            audioManager.setSpeakerphoneOn(enable);
+//        }
+
+//        int earpiece = CallAudioState.ROUTE_WIRED_OR_EARPIECE;
+//        int speaker = CallAudioState.ROUTE_SPEAKER;
+//
+//        if (android.os.Build.VERSION.SDK_INT > android.os.Build.VERSION_CODES.P){
+//            CallService.getInstance().setAudioRoute(isSpeakerOn ? earpiece : speaker);
+//        } else {
+//            am.setSpeakerphoneOn(!isSpeakerOn);
+//        }
     }
+
+
 
     // --- TODO (zxcpoiu): These two api name is really confusing. should be changed.
     /**
@@ -1070,8 +1205,10 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
             public void onPrepared(MediaPlayer mp) {
                 Log.d(TAG, String.format("MediaPlayer %s onPrepared(), start play, isSpeakerPhoneOn %b", name, audioManager.isSpeakerphoneOn()));
                 if (name.equals("mBusytone")) {
+                    Log.d(TAG, "change mode 1");
                     audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
                 } else if (name.equals("mRingback")) {
+                    Log.d(TAG, "change mode 2");
                     audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
                 } else if (name.equals("mRingtone")) {
                     audioManager.setMode(AudioManager.MODE_RINGTONE);
@@ -1342,8 +1479,10 @@ public class InCallManagerModule extends ReactContextBaseJavaModule implements L
 
                         // --- make sure audio routing, or it will be wired when switch suddenly
                         if (caller.equals("mBusytone")) {
+                            Log.d(TAG, "change mode 3");
                             audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
                         } else if (caller.equals("mRingback")) {
+                            Log.d(TAG, "change mode 4");
                             audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
                         } else if (caller.equals("mRingtone")) {
                             audioManager.setMode(AudioManager.MODE_RINGTONE);
